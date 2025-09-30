@@ -1,0 +1,19 @@
+/dts-v1/;
+/plugin/;
+
+/* Device Tree overlay for nxp_simtemp */
+/ {
+    compatible = "brcm,bcm2835";
+    
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            simtemp0: simtemp@0 {
+                compatible = "nxp,simtemp";
+                sampling-ms = <100>;
+                threshold-mC = <45000>;
+                status = "okay";
+            };
+        };
+    };
+};

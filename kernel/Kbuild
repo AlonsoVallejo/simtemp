@@ -1,0 +1,1 @@
+obj-m += nxp_simtemp.o
