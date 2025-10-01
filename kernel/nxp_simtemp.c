@@ -12,6 +12,9 @@
 #define SIMTEMP_DEVICE_NAME "simtemp"
 #define SIMTEMP_CLASS_NAME  "simtemp_class"
 
+#define NEW_SAMPLE 0x1
+#define THRESHOLD_CROSSED 0x2
+
 static dev_t simtemp_dev_num;
 static struct class *simtemp_class = NULL;
 static struct cdev simtemp_cdev;
@@ -215,6 +218,7 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
 {
     struct simtemp_sample sample;
     static DEFINE_MUTEX(local_lock); // for per-file state
+    static int last_alert_state = 0; // 0: below, 1: above or equal
 
     /* Wait for a new sample (block until simtemp_sample_seq changes) */
     mutex_lock(&local_lock);
@@ -238,7 +242,16 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
     mutex_lock(&simtemp_lock);
     sample.timestamp_ns = ktime_get_ns();
     sample.temp_mC = simtemp_current_mC;
-    sample.flags = 0; // No event flags for now
+    sample.flags = NEW_SAMPLE;
+    int alert = (simtemp_current_mC >= threshold_mC) ? 1 : 0;
+    if (alert) {
+        sample.flags |= THRESHOLD_CROSSED;
+    }
+    // Detect threshold crossing (edge)
+    if (alert != last_alert_state) {
+        stats_alerts++;
+        last_alert_state = alert;
+    }
     mutex_unlock(&simtemp_lock);
     mutex_unlock(&local_lock);
 
