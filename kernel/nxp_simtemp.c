@@ -26,11 +26,59 @@ static unsigned int stats_updates = 0;
 static unsigned int stats_alerts = 0;
 static int stats_last_error = 0;
 
+/* Simulated temperature state */
+
+static int simtemp_current_mC = 44000; // 44.0C initial
+static struct timer_list simtemp_timer;
+static DEFINE_MUTEX(simtemp_lock);
+
+static wait_queue_head_t simtemp_wq;
+static unsigned int simtemp_sample_seq = 0; // increments on each new sample
+
+/**
+ * @brief Timer callback to update the simulated temperature value.
+ * @param[in] t Pointer to the timer_list structure (unused).
+ */
+/**
+ * @brief Timer callback to update the simulated temperature value.
+ * @param[in] t Pointer to the timer_list structure (unused).
+ */
+static void simtemp_update_temp(struct timer_list *t)
+{
+    mutex_lock(&simtemp_lock);
+    /* Simple simulation: sine wave or random walk, for now just increment */
+    simtemp_current_mC += 10; /* +0.01C per tick */
+    if (simtemp_current_mC > 46000)
+        simtemp_current_mC = 44000;
+    stats_updates++;
+    simtemp_sample_seq++;
+    mutex_unlock(&simtemp_lock);
+
+    wake_up_interruptible(&simtemp_wq);
+    mod_timer(&simtemp_timer, jiffies + msecs_to_jiffies(sampling_ms));
+}
+
 /* Sysfs show/store functions */
+/**
+ * @brief Show function for sampling_ms sysfs attribute.
+ * @param[in] dev Device pointer.
+ * @param[in] attr Device attribute pointer.
+ * @param[out] buf Output buffer for value.
+ * @return Number of bytes written to buf.
+ */
 static ssize_t sampling_ms_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
     return sprintf(buf, "%u\n", sampling_ms);
 }
+
+/**
+ * @brief Store function for sampling_ms sysfs attribute.
+ * @param[in] dev Device pointer.
+ * @param[in] attr Device attribute pointer.
+ * @param[in] buf Input buffer with value.
+ * @param[in] count Number of bytes in buf.
+ * @return Number of bytes consumed, or negative error code.
+ */
 static ssize_t sampling_ms_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
     unsigned int val;
@@ -41,10 +89,26 @@ static ssize_t sampling_ms_store(struct device *dev, struct device_attribute *at
 }
 static DEVICE_ATTR_RW(sampling_ms);
 
+/**
+ * @brief Show function for threshold_mC sysfs attribute.
+ * @param[in] dev Device pointer.
+ * @param[in] attr Device attribute pointer.
+ * @param[out] buf Output buffer for value.
+ * @return Number of bytes written to buf.
+ */
 static ssize_t threshold_mC_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
     return sprintf(buf, "%d\n", threshold_mC);
 }
+
+/**
+ * @brief Store function for threshold_mC sysfs attribute.
+ * @param[in] dev Device pointer.
+ * @param[in] attr Device attribute pointer.
+ * @param[in] buf Input buffer with value.
+ * @param[in] count Number of bytes in buf.
+ * @return Number of bytes consumed, or negative error code.
+ */
 static ssize_t threshold_mC_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
     int val;
@@ -55,10 +119,26 @@ static ssize_t threshold_mC_store(struct device *dev, struct device_attribute *a
 }
 static DEVICE_ATTR_RW(threshold_mC);
 
+/**
+ * @brief Show function for mode sysfs attribute.
+ * @param[in] dev Device pointer.
+ * @param[in] attr Device attribute pointer.
+ * @param[out] buf Output buffer for value.
+ * @return Number of bytes written to buf.
+ */
 static ssize_t mode_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
     return sprintf(buf, "%s\n", mode);
 }
+
+/**
+ * @brief Store function for mode sysfs attribute.
+ * @param[in] dev Device pointer.
+ * @param[in] attr Device attribute pointer.
+ * @param[in] buf Input buffer with value.
+ * @param[in] count Number of bytes in buf.
+ * @return Number of bytes consumed, or negative error code.
+ */
 static ssize_t mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
     size_t len = min(count, sizeof(mode)-1);
@@ -71,28 +151,104 @@ static ssize_t mode_store(struct device *dev, struct device_attribute *attr, con
 }
 static DEVICE_ATTR_RW(mode);
 
+/**
+ * @brief Show function for stats sysfs attribute.
+ * @param[in] dev Device pointer.
+ * @param[in] attr Device attribute pointer.
+ * @param[out] buf Output buffer for value.
+ * @return Number of bytes written to buf.
+ */
 static ssize_t stats_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
     return sprintf(buf, "updates=%u\nalerts=%u\nlast_error=%d\n", stats_updates, stats_alerts, stats_last_error);
 }
 static DEVICE_ATTR_RO(stats);
 
+/**
+ * @brief Open function for the simtemp character device.
+ * @param[in] inode Inode pointer.
+ * @param[in] file File pointer.
+ * @return 0 on success.
+ */
 static int simtemp_open(struct inode *inode, struct file *file)
 {
     pr_info("nxp_simtemp: device opened\n");
     return 0;
 }
 
+/**
+ * @brief Release function for the simtemp character device.
+ * @param[in] inode Inode pointer.
+ * @param[in] file File pointer.
+ * @return 0 on success.
+ */
 static int simtemp_release(struct inode *inode, struct file *file)
 {
     pr_info("nxp_simtemp: device closed\n");
     return 0;
 }
 
+
+struct simtemp_sample {
+    __u64 timestamp_ns;
+    __s32 temp_mC;
+    __u32 flags;
+} __attribute__((packed));
+
+/**
+ * @brief Read function for the simtemp character device.
+ * @param[in] file File pointer.
+ * @param[out] buf User buffer to copy data to.
+ * @param[in] count Number of bytes to read.
+ * @param[in,out] ppos File position pointer.
+ * @return Number of bytes read, or negative error code.
+ */
+/**
+ * @brief Read function for the simtemp character device.
+ * @param[in] file File pointer.
+ * @param[out] buf User buffer to copy data to.
+ * @param[in] count Number of bytes to read.
+ * @param[in,out] ppos File position pointer.
+ * @return Number of bytes read, or negative error code.
+ */
 static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-    pr_info("nxp_simtemp: read called\n");
-    return 0; /* No data yet */
+    struct simtemp_sample sample;
+    static DEFINE_MUTEX(local_lock); // for per-file state
+
+    /* Wait for a new sample (block until simtemp_sample_seq changes) */
+    mutex_lock(&local_lock);
+    unsigned int prev_seq;
+    mutex_lock(&simtemp_lock);
+    prev_seq = simtemp_sample_seq;
+    mutex_unlock(&simtemp_lock);
+
+    if (wait_event_interruptible(simtemp_wq, ({
+        unsigned int cur_seq;
+        mutex_lock(&simtemp_lock);
+        cur_seq = simtemp_sample_seq;
+        mutex_unlock(&simtemp_lock);
+        cur_seq != prev_seq;
+    })) < 0)
+    {
+        mutex_unlock(&local_lock);
+        return -ERESTARTSYS;
+    }
+
+    mutex_lock(&simtemp_lock);
+    sample.timestamp_ns = ktime_get_ns();
+    sample.temp_mC = simtemp_current_mC;
+    sample.flags = 0; // No event flags for now
+    mutex_unlock(&simtemp_lock);
+    mutex_unlock(&local_lock);
+
+    if (count < sizeof(sample))
+        return -EINVAL;
+
+    if (copy_to_user(buf, &sample, sizeof(sample)))
+        return -EFAULT;
+
+    return sizeof(sample);
 }
 
 static struct file_operations simtemp_fops = {
@@ -103,10 +259,28 @@ static struct file_operations simtemp_fops = {
 };
 
 
+/**
+ * @brief Probe function for the nxp_simtemp platform driver.
+ * @param[in] pdev Platform device pointer.
+ * @return 0 on success, negative error code on failure.
+ */
+/**
+ * @brief Probe function for the nxp_simtemp platform driver.
+ * @param[in] pdev Platform device pointer.
+ * @return 0 on success, negative error code on failure.
+ */
 static int nxp_simtemp_probe(struct platform_device *pdev)
 {
     int ret;
     pr_info("nxp_simtemp: probe\n");
+
+    /* Initialize wait queue and sample sequence */
+    init_waitqueue_head(&simtemp_wq);
+    simtemp_sample_seq = 0;
+
+    /* Initialize temperature simulation timer */
+    timer_setup(&simtemp_timer, simtemp_update_temp, 0);
+    mod_timer(&simtemp_timer, jiffies + msecs_to_jiffies(sampling_ms));
 
     /* Allocate device number */
     ret = alloc_chrdev_region(&simtemp_dev_num, 0, 1, SIMTEMP_DEVICE_NAME);
@@ -162,9 +336,14 @@ static int nxp_simtemp_probe(struct platform_device *pdev)
 }
 
 
+/**
+ * @brief Remove function for the nxp_simtemp platform driver.
+ * @param[in] pdev Platform device pointer.
+ */
 static void nxp_simtemp_remove(struct platform_device *pdev)
 {
     pr_info("nxp_simtemp: remove\n");
+    del_timer_sync(&simtemp_timer);
     if (simtemp_device) {
         device_remove_file(simtemp_device, &dev_attr_sampling_ms);
         device_remove_file(simtemp_device, &dev_attr_threshold_mC);
@@ -194,6 +373,10 @@ static struct platform_driver nxp_simtemp_driver = {
     .remove = nxp_simtemp_remove,
 };
 
+/**
+ * @brief Module initialization function.
+ * @return 0 on success, negative error code on failure.
+ */
 static int __init nxp_simtemp_init(void)
 {
     int ret;
@@ -225,9 +408,14 @@ static int __init nxp_simtemp_init(void)
     return 0;
 }
 
+/**
+ * @brief Module exit function.
+ */
 static void __exit nxp_simtemp_exit(void)
 {
     pr_info("nxp_simtemp: exit\n");
+
+    del_timer_sync(&simtemp_timer);
     
     /* Remove test platform device */
     if (test_pdev) {

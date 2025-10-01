@@ -145,9 +145,9 @@ dmesg | tail -5
 - [x] Device Tree overlay support
 - [x] Clean module loading/unloading
 - [x] Build system (Makefile) for kernel module and DT overlay
+- [x] Temperature simulation logic
 
 ### 🚧 In Progress / TODO
-- [ ] Temperature simulation logic
 - [ ] Timer/workqueue for periodic sampling
 - [ ] Ring buffer for sample storage
 - [ ] Sysfs attributes for configuration
