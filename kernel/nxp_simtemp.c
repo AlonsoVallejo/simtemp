@@ -143,8 +143,8 @@ static ssize_t sampling_ms_show(struct device *dev, struct device_attribute *att
 static ssize_t sampling_ms_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
     unsigned int val;
+    /* check for valid input values */
     if ( ( kstrtouint(buf, 10, &val) < 0 ) || (val == 0) ) {
-        /* Invalid input */
         stats_last_error = -EINVAL;
         return -EINVAL;
     }
@@ -213,16 +213,24 @@ static ssize_t mode_show(struct device *dev, struct device_attribute *attr, char
 static ssize_t mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
     size_t len = min(count, sizeof(mode)-1);
+    char tmp[16];
 
-    memcpy(mode, buf, len);
-    
-    mode[len] = '\0'; /* Null-terminate the string */
+    memcpy(tmp, buf, len);
+    tmp[len] = '\0';
 
     /* Remove trailing newline if present */
-    if (len > 0 && mode[len-1] == '\n') {
-        mode[len-1] = '\0'; /* Remove trailing newline */
+    if (len > 0 && tmp[len-1] == '\n')
+        tmp[len-1] = '\0';
+
+    /* Validate mode */
+    if (strcmp(tmp, "normal") != 0 &&
+        strcmp(tmp, "noisy") != 0 &&
+        strcmp(tmp, "ramp") != 0) {
+        stats_last_error = -EINVAL;
+        return -EINVAL;
     }
 
+    strcpy(mode, tmp);
     return count;
 }
 static DEVICE_ATTR_RW(mode); /* Read/Write attribute */
