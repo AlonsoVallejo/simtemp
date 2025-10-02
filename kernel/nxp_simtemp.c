@@ -1,4 +1,3 @@
-
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
@@ -38,6 +37,12 @@ static DEFINE_MUTEX(simtemp_lock);
 static wait_queue_head_t simtemp_wq;
 static unsigned int simtemp_sample_seq = 0; // increments on each new sample
 
+/* Functions prototypes */
+static void simtemp_update_temp(struct timer_list *t);
+static void simtemp_mode_normal(void);
+static void simtemp_mode_noisy(void);
+static void simtemp_mode_ramp(void);
+
 /**
  * @brief Timer callback to update the simulated temperature value.
  * @param[in] t Pointer to the timer_list structure (unused).
@@ -49,16 +54,69 @@ static unsigned int simtemp_sample_seq = 0; // increments on each new sample
 static void simtemp_update_temp(struct timer_list *t)
 {
     mutex_lock(&simtemp_lock);
-    /* Simple simulation: sine wave or random walk, for now just increment */
-    simtemp_current_mC += 10; /* +0.01C per tick */
-    if (simtemp_current_mC > 46000)
-        simtemp_current_mC = 44000;
+
+    if (strcmp(mode, "noisy") == 0) {
+        simtemp_mode_noisy();
+    } else if (strcmp(mode, "ramp") == 0) {
+        simtemp_mode_ramp();
+    } else if (strcmp(mode, "normal") == 0) {
+        simtemp_mode_normal();
+    } else {
+        /* invalid entered mode, use last valid mode */
+    }
+
     stats_updates++;
     simtemp_sample_seq++;
     mutex_unlock(&simtemp_lock);
 
     wake_up_interruptible(&simtemp_wq);
     mod_timer(&simtemp_timer, jiffies + msecs_to_jiffies(sampling_ms));
+}
+
+/**
+ * @brief Normal mode simulation. Increases temperature by 0.1C every tick, wraps at 46.0C.
+ * @return void
+*/
+static void simtemp_mode_normal(void)
+{
+    simtemp_current_mC += 10; /* 0.1C per tick */
+    if (simtemp_current_mC > 46000) {
+        /* Wrap around */
+        simtemp_current_mC = 44000;
+    }
+}
+
+/**
+ * @brief Noisy mode simulation. Adds random noise to the temperature.
+ * @return void
+ */
+static void simtemp_mode_noisy(void)
+{
+    int noise = (get_random_u32() % 200) - 100; /* Random noise between -100 and +100 mC */
+    simtemp_current_mC += noise;
+    if (simtemp_current_mC > 46000) {
+        simtemp_current_mC = 46000;
+    }
+    if (simtemp_current_mC < 44000) {
+        simtemp_current_mC = 44000;
+    }
+}
+
+/**
+ * @brief Ramp mode simulation. Ramps temperature up and down between 44.0C and 46.0C.
+ * @return void
+ */
+static void simtemp_mode_ramp(void)
+{
+    static int direction = 1;
+    simtemp_current_mC += direction * 50;  /* 0.05C per tick */
+    if (simtemp_current_mC >= 46000) { 
+        direction = -1;
+    }
+
+    if (simtemp_current_mC <= 44000) {
+        direction = 1;
+    }
 }
 
 /* Sysfs show/store functions */
@@ -85,12 +143,17 @@ static ssize_t sampling_ms_show(struct device *dev, struct device_attribute *att
 static ssize_t sampling_ms_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
     unsigned int val;
-    if (kstrtouint(buf, 10, &val) < 0 || val == 0)
+    if ( ( kstrtouint(buf, 10, &val) < 0 ) || (val == 0) ) {
+        /* Invalid input */
+        stats_last_error = -EINVAL;
         return -EINVAL;
+    }
+
     sampling_ms = val;
+    
     return count;
 }
-static DEVICE_ATTR_RW(sampling_ms);
+static DEVICE_ATTR_RW(sampling_ms); /* Read/Write attribute */
 
 /**
  * @brief Show function for threshold_mC sysfs attribute.
@@ -115,12 +178,17 @@ static ssize_t threshold_mC_show(struct device *dev, struct device_attribute *at
 static ssize_t threshold_mC_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
     int val;
-    if (kstrtoint(buf, 10, &val) < 0)
+    if (kstrtoint(buf, 10, &val) < 0) {
+        /* Invalid input */
+        stats_last_error = -EINVAL;
         return -EINVAL;
+    }
+
     threshold_mC = val;
+    
     return count;
 }
-static DEVICE_ATTR_RW(threshold_mC);
+static DEVICE_ATTR_RW(threshold_mC); /* Read/Write attribute */
 
 /**
  * @brief Show function for mode sysfs attribute.
@@ -145,14 +213,19 @@ static ssize_t mode_show(struct device *dev, struct device_attribute *attr, char
 static ssize_t mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
     size_t len = min(count, sizeof(mode)-1);
+
     memcpy(mode, buf, len);
-    mode[len] = '\0';
+    
+    mode[len] = '\0'; /* Null-terminate the string */
+
     /* Remove trailing newline if present */
-    if (len > 0 && mode[len-1] == '\n')
-        mode[len-1] = '\0';
+    if (len > 0 && mode[len-1] == '\n') {
+        mode[len-1] = '\0'; /* Remove trailing newline */
+    }
+
     return count;
 }
-static DEVICE_ATTR_RW(mode);
+static DEVICE_ATTR_RW(mode); /* Read/Write attribute */
 
 /**
  * @brief Show function for stats sysfs attribute.
@@ -165,7 +238,7 @@ static ssize_t stats_show(struct device *dev, struct device_attribute *attr, cha
 {
     return sprintf(buf, "updates=%u\nalerts=%u\nlast_error=%d\n", stats_updates, stats_alerts, stats_last_error);
 }
-static DEVICE_ATTR_RO(stats);
+static DEVICE_ATTR_RO(stats); /* Read-Only attribute */
 
 /**
  * @brief Open function for the simtemp character device.
@@ -191,7 +264,7 @@ static int simtemp_release(struct inode *inode, struct file *file)
     return 0;
 }
 
-
+/* Data structure for a temperature sample */
 struct simtemp_sample {
     __u64 timestamp_ns;
     __s32 temp_mC;
@@ -217,8 +290,8 @@ struct simtemp_sample {
 static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
     struct simtemp_sample sample;
-    static DEFINE_MUTEX(local_lock); // for per-file state
-    static int last_alert_state = 0; // 0: below, 1: above or equal
+    static DEFINE_MUTEX(local_lock); /* for per-file state */
+    static int last_alert_state = 0; /* 0: below, 1: above or equal */
 
     /* Wait for a new sample (block until simtemp_sample_seq changes) */
     mutex_lock(&local_lock);
@@ -236,6 +309,8 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
     })) < 0)
     {
         mutex_unlock(&local_lock);
+        /* Interrupted by signal */
+        stats_last_error = -ERESTARTSYS;
         return -ERESTARTSYS;
     }
 
@@ -247,7 +322,7 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
     if (alert) {
         sample.flags |= THRESHOLD_CROSSED;
     }
-    // Detect threshold crossing (edge)
+    /* Detect threshold crossing (edge) */
     if (alert != last_alert_state) {
         stats_alerts++;
         last_alert_state = alert;
@@ -255,11 +330,17 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
     mutex_unlock(&simtemp_lock);
     mutex_unlock(&local_lock);
 
-    if (count < sizeof(sample))
+    if (count < sizeof(sample)) {
+        /* Buffer too small */
+        stats_last_error = -EINVAL;
         return -EINVAL;
+    }
 
-    if (copy_to_user(buf, &sample, sizeof(sample)))
+    if (copy_to_user(buf, &sample, sizeof(sample))) {
+        /* Failed to copy to user */
+        stats_last_error = -EFAULT;
         return -EFAULT;
+    }
 
     return sizeof(sample);
 }

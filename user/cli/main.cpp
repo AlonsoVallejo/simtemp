@@ -88,14 +88,16 @@ std::string format_iso8601(uint64_t ns) {
 /**
  * @brief Format a simtemp_sample as a human-readable string.
  * @param[in] sample The temperature sample to format.
- * @return Formatted string for CLI output.
+ * @return Formatted string for CLI output. i.e. "2024-10-05T12:34:56.789Z temp=45.0C alert=1 Threshold_mC=45000 mode=normal"
  */
 std::string format_sample(const simtemp_sample& sample) {
     std::ostringstream oss;
     oss << format_iso8601(sample.timestamp_ns)
         << " temp=" << std::fixed << std::setprecision(1)
         << (sample.temp_mC / 1000.0)
-        << "C alert=" << ((sample.flags & 0x2) ? 1 : 0);
+        << "C alert=" << ((sample.flags & 0x2) ? 1 : 0)
+        << " Threshold_mC=" << sysfs::get_threshold_mC()
+        << " mode=" << sysfs::get_mode();
     return oss.str();
 }
 
