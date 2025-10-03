@@ -1,4 +1,3 @@
-
 #include <iostream>
 #include <iomanip>
 #include <fcntl.h>
@@ -13,6 +12,9 @@
 #include <thread>
 #include <chrono>
 #include <string>
+
+#define NEW_SAMPLE 0x1
+#define THRESHOLD_CROSSED 0x2
 
 /**
  * @brief Temperature sample structure matching kernel layout.
@@ -34,11 +36,12 @@ namespace sysfs {
      */
     unsigned int get_sampling_period_ms() {
         std::ifstream f(base + "sampling_ms");
-        unsigned int ms = 100;
+        unsigned int curr_ms = 100;
+
         if (f.is_open()) {
-            f >> ms;
+            f >> curr_ms;
         }
-        return ms;
+        return curr_ms;
     }
 
     /**
@@ -47,11 +50,12 @@ namespace sysfs {
      */
     int get_threshold_mC() {
         std::ifstream f(base + "threshold_mC");
-        int val = 45000;
+        int th_val = 45000;
+
         if (f.is_open()) {
-            f >> val;
+            f >> th_val;
         }
-        return val;
+        return th_val;
     }
 
     /**
@@ -60,11 +64,41 @@ namespace sysfs {
      */
     std::string get_mode() {
         std::ifstream f(base + "mode");
-        std::string m = "normal";
+        std::string mode = "normal";
+        
         if (f.is_open()) {
-            f >> m;
+            f >> mode;
         }
-        return m;
+        return mode;
+    }
+
+    /**
+     * @brief Set the current sampling period in sysfs.
+     * @param[in] set_ms Sampling period in milliseconds.
+     * @return true on success, false on failure.
+     */
+    bool set_sampling_period_ms(unsigned int set_ms) {
+        std::ofstream f(base + "sampling_ms");
+
+        if (!f.is_open()) { 
+            return false;
+        }
+        f << set_ms << std::endl;
+        return f.good();
+    }
+
+    /**
+     * @brief Set the current threshold in sysfs.
+     * @param[in] th_val Threshold in milli-degrees Celsius.
+     * @return true on success, false on failure.
+     */
+    bool set_threshold_mC(int th_val) {
+        std::ofstream f(base + "threshold_mC");
+        if (!f.is_open()) {
+            return false;
+        }
+        f << th_val << std::endl;
+        return f.good();
     }
 }
 
@@ -79,9 +113,11 @@ std::string format_iso8601(uint64_t ns) {
     struct tm tm;
     char buf[32];
     char out[40];
+
     gmtime_r(&sec, &tm);
     strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
     snprintf(out, sizeof(out), "%s.%03uZ", buf, ms);
+    
     return std::string(out);
 }
 
@@ -92,13 +128,15 @@ std::string format_iso8601(uint64_t ns) {
  */
 std::string format_sample(const simtemp_sample& sample) {
     std::ostringstream oss;
+
     oss << format_iso8601(sample.timestamp_ns)
         << " temp=" << std::fixed << std::setprecision(1)
         << (sample.temp_mC / 1000.0)
         << "C alert=" << ((sample.flags & 0x2) ? 1 : 0)
         << " Threshold_mC=" << sysfs::get_threshold_mC()
         << " mode=" << sysfs::get_mode();
-    return oss.str();
+
+        return oss.str();
 }
 
 /**
@@ -119,17 +157,19 @@ public:
      * @brief Destructor. Closes device if open.
      */
     ~SimTempDevice() { if (fd_ >= 0) close(fd_); }
-
+    
     /**
      * @brief Open the device file for reading.
      * @return true on success, false on failure.
      */
     bool open_device() {
         fd_ = open(devpath_.c_str(), O_RDONLY);
+
         if (fd_ < 0) {
             perror("open");
             return false;
         }
+
         return true;
     }
 
@@ -144,13 +184,16 @@ public:
         FD_ZERO(&rfds);
         FD_SET(fd_, &rfds);
         struct timeval tv;
+
         tv.tv_sec = timeout_ms / 1000;
         tv.tv_usec = (timeout_ms % 1000) * 1000;
         int ret = select(fd_+1, &rfds, NULL, NULL, &tv);
+
         if (ret < 0) {
             perror("select");
             return false;
         }
+        
         if (FD_ISSET(fd_, &rfds)) {
             ssize_t n = read(fd_, &sample, sizeof(sample));
             if (n == sizeof(sample)) {
@@ -163,6 +206,7 @@ public:
                 return false;
             }
         }
+
         return false;
     }
 };
@@ -189,6 +233,111 @@ void run_monitor_mode() {
     }
 }
 
+void prompt_and_set_config() {
+    unsigned int curr_sampling = sysfs::get_sampling_period_ms();
+    int curr_threshold = sysfs::get_threshold_mC();
+    unsigned int sampling_val = 0;
+    int threshold_val = 0;
+    std::string input;
+
+    std::cout << "Enter sampling period in ms [" << curr_sampling << "]: ";
+    std::getline(std::cin, input);
+
+    if (!input.empty()) {
+        try {
+            sampling_val = std::stoul(input);
+            if (sampling_val > 0) {
+                if (sysfs::set_sampling_period_ms(sampling_val)) {
+                    curr_sampling = sampling_val;
+                } else {
+                    std::cerr << "Failed to set sampling_ms, using previous value.\n";
+                }
+            }
+        } catch (...) {
+            std::cerr << "Invalid input, using previous value.\n";
+        }
+    }
+
+    std::cout << "Enter threshold in milli-Celsius [" << curr_threshold << "]: ";
+    std::getline(std::cin, input);
+
+    if (!input.empty()) {
+        try {
+            threshold_val = std::stoi(input);
+            if (sysfs::set_threshold_mC(threshold_val)) {
+                curr_threshold = threshold_val;
+            } else {
+                std::cerr << "Failed to set threshold_mC, using previous value.\n";
+            }
+        } catch (...) {
+            std::cerr << "Invalid input, using previous value.\n";
+        }
+    }
+
+    std::cout << "Using sampling_ms=" << curr_sampling << ", threshold_mC=" << curr_threshold << std::endl;
+}
+
+/**
+ * @brief Test mode: set low threshold, wait for alert event, report PASS/FAIL.
+ * @return 0 on PASS, non-zero on FAIL.
+ */
+int run_test_mode() {
+    /* 1. Get current temperature */
+    SimTempDevice dev;
+    simtemp_sample sample;
+    int low_threshold = 0;
+    unsigned int period = 0;
+    bool got_alert = false;
+
+    std::cout << "[TEST] Starting test mode..." << std::endl;
+
+    if (!dev.open_device()) {
+        std::cerr << "Failed to open /dev/simtemp" << std::endl;
+        return 2;
+    }
+    
+    if (!dev.read_sample(sample, 500)) {
+        std::cerr << "Failed to read initial sample" << std::endl;
+        return 2;
+    }
+
+    low_threshold = sample.temp_mC - 100; /* 0.1C below current */
+    period = sysfs::get_sampling_period_ms();
+    
+    if (period < 10) {
+        period = 10; /* avoid too fast */
+    }
+
+    /* 2. Set threshold and (optionally) period */
+    if (!sysfs::set_threshold_mC(low_threshold)) {
+        std::cerr << "Failed to set test threshold" << std::endl;
+        return 2;
+    }
+
+    /* Optionally set period to 100ms for test speed */
+    sysfs::set_sampling_period_ms(period);
+
+    std::cout << "[TEST] Set threshold_mC=" << low_threshold << ", sampling_ms=" << period << std::endl;
+
+    /* 3. Wait for up to 2 periods for alert */
+    for (int period_count = 0; period_count < 2; ++period_count) {
+        if (dev.read_sample(sample, period + 100)) {
+            if (sample.flags & THRESHOLD_CROSSED) {
+                got_alert = true;
+                break;
+            }
+        }
+    }
+
+    if (got_alert) {
+        std::cout << "[TEST] PASS: Alert event detected." << std::endl;
+        return 0;
+    } else {
+        std::cout << "[TEST] FAIL: No alert within 2 periods." << std::endl;
+        return 1;
+    }
+}
+
 /**
  * @brief Main CLI entrypoint. Parses arguments and dispatches modes.
  * @param[in] argc Argument count
@@ -196,7 +345,10 @@ void run_monitor_mode() {
  * @return Exit code
  */
 int main(int argc, char* argv[]) {
-    /* TODO: parse args for future modes (test, config, etc) */
+    if (argc > 1 && std::string(argv[1]) == "--test") {
+        return run_test_mode();
+    }
+    prompt_and_set_config();
     run_monitor_mode();
     return 0;
 }
