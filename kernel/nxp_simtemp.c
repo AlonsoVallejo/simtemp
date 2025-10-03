@@ -7,12 +7,21 @@
 #include <linux/uaccess.h>
 #include <linux/of.h>
 #include "nxp_simtemp.h"
+#include <linux/poll.h>
 
 #define SIMTEMP_DEVICE_NAME "simtemp"
 #define SIMTEMP_CLASS_NAME  "simtemp_class"
 
 #define NEW_SAMPLE 0x1
 #define THRESHOLD_CROSSED 0x2
+
+/** 
+ * @brief Per-file state for poll/read threshold event tracking.
+ */
+struct simtemp_file_state {
+    unsigned int last_seq;
+    int last_alert_state;
+};
 
 static dev_t simtemp_dev_num;
 static struct class *simtemp_class = NULL;
@@ -42,6 +51,16 @@ static void simtemp_update_temp(struct timer_list *t);
 static void simtemp_mode_normal(void);
 static void simtemp_mode_noisy(void);
 static void simtemp_mode_ramp(void);
+static struct simtemp_file_state *simtemp_get_file_state(struct file *file);
+
+/**
+ * @brief Binary record returned to user space.
+ */
+struct simtemp_sample {
+    __u64 timestamp_ns;   /* monotonic timestamp */
+    __s32 temp_mC;        /* milli-degree Celsius */
+    __u32 flags;          /* bit0=NEW_SAMPLE, bit1=THRESHOLD_CROSSED */
+} __attribute__((packed));
 
 /**
  * @brief Timer callback to update the simulated temperature value.
@@ -268,25 +287,84 @@ static int simtemp_open(struct inode *inode, struct file *file)
  */
 static int simtemp_release(struct inode *inode, struct file *file)
 {
+    struct simtemp_file_state *state = NULL;
     pr_info("nxp_simtemp: device closed\n");
+    state = file->private_data;
+    if (state) {
+        kfree(state);
+        file->private_data = NULL;
+    }
     return 0;
 }
 
-/* Data structure for a temperature sample */
-struct simtemp_sample {
-    __u64 timestamp_ns;
-    __s32 temp_mC;
-    __u32 flags;
-} __attribute__((packed));
+/**
+ * @brief poll() implementation for /dev/simtemp.
+ *        - POLLIN: new sample available
+ *        - POLLPRI: threshold crossing event
+ */
+static unsigned int simtemp_poll(struct file *file, poll_table *wait)
+{
+    unsigned int mask = 0;
+    struct simtemp_file_state *state = NULL;
+    unsigned int cur_seq = 0;
+    int alert = 0;
+
+    state = simtemp_get_file_state(file);
+    if (!state) {
+        return POLLERR;
+    }
+
+    poll_wait(file, &simtemp_wq, wait);
+
+    mutex_lock(&simtemp_lock);
+    cur_seq = simtemp_sample_seq;
+    alert = (simtemp_current_mC >= threshold_mC) ? 1 : 0;
+    if (cur_seq != state->last_seq) {
+        mask |= POLLIN | POLLRDNORM;
+    }
+    if (alert != state->last_alert_state) {
+        mask |= POLLPRI;
+    }
+    mutex_unlock(&simtemp_lock);
+
+    return mask;
+}
 
 /**
- * @brief Read function for the simtemp character device.
- * @param[in] file File pointer.
- * @param[out] buf User buffer to copy data to.
- * @param[in] count Number of bytes to read.
- * @param[in,out] ppos File position pointer.
- * @return Number of bytes read, or negative error code.
+ * @brief Helper to get or allocate per-file state.
  */
+static struct simtemp_file_state *simtemp_get_file_state(struct file *file)
+{
+    struct simtemp_file_state *state = NULL;
+    state = file->private_data;
+    if (!state) {
+        state = kzalloc(sizeof(*state), GFP_KERNEL);
+        if (!state) {
+            return NULL;
+        }
+        mutex_lock(&simtemp_lock);
+        state->last_seq = simtemp_sample_seq;
+        state->last_alert_state = (simtemp_current_mC >= threshold_mC) ? 1 : 0;
+        mutex_unlock(&simtemp_lock);
+        file->private_data = state;
+    }
+    return state;
+}
+
+/**
+ * @brief Update per-file state after read.
+ *        (Call this at the end of simtemp_read)
+ */
+static void simtemp_update_file_state(struct file *file, unsigned int seq, int alert)
+{
+    struct simtemp_file_state *state = NULL;
+    state = simtemp_get_file_state(file);
+    if (state) {
+        state->last_seq = seq;
+        state->last_alert_state = alert;
+    }
+}
+
 /**
  * @brief Read function for the simtemp character device.
  * @param[in] file File pointer.
@@ -298,26 +376,30 @@ struct simtemp_sample {
 static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
     struct simtemp_sample sample;
-    static DEFINE_MUTEX(local_lock); /* for per-file state */
-    static int last_alert_state = 0; /* 0: below, 1: above or equal */
+    struct simtemp_file_state *state = NULL;
+    unsigned int prev_seq = 0;
+    int last_alert_state = 0;
+    int alert = 0;
+    int ret = 0;
 
-    /* Wait for a new sample (block until simtemp_sample_seq changes) */
-    mutex_lock(&local_lock);
-    unsigned int prev_seq;
+    state = simtemp_get_file_state(file);
+    if (!state) {
+        return -ENOMEM;
+    }
+
     mutex_lock(&simtemp_lock);
     prev_seq = simtemp_sample_seq;
+    last_alert_state = (simtemp_current_mC >= threshold_mC) ? 1 : 0;
     mutex_unlock(&simtemp_lock);
 
-    if (wait_event_interruptible(simtemp_wq, ({
-        unsigned int cur_seq;
+    ret = wait_event_interruptible(simtemp_wq, ({
+        unsigned int cur_seq = 0;
         mutex_lock(&simtemp_lock);
         cur_seq = simtemp_sample_seq;
         mutex_unlock(&simtemp_lock);
-        cur_seq != prev_seq;
-    })) < 0)
-    {
-        mutex_unlock(&local_lock);
-        /* Interrupted by signal */
+        (cur_seq != prev_seq);
+    }));
+    if (ret < 0) {
         stats_last_error = -ERESTARTSYS;
         return -ERESTARTSYS;
     }
@@ -326,29 +408,26 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
     sample.timestamp_ns = ktime_get_ns();
     sample.temp_mC = simtemp_current_mC;
     sample.flags = NEW_SAMPLE;
-    int alert = (simtemp_current_mC >= threshold_mC) ? 1 : 0;
+    alert = (simtemp_current_mC >= threshold_mC) ? 1 : 0;
     if (alert) {
         sample.flags |= THRESHOLD_CROSSED;
     }
-    /* Detect threshold crossing (edge) */
     if (alert != last_alert_state) {
         stats_alerts++;
-        last_alert_state = alert;
     }
     mutex_unlock(&simtemp_lock);
-    mutex_unlock(&local_lock);
 
     if (count < sizeof(sample)) {
-        /* Buffer too small */
         stats_last_error = -EINVAL;
         return -EINVAL;
     }
 
     if (copy_to_user(buf, &sample, sizeof(sample))) {
-        /* Failed to copy to user */
         stats_last_error = -EFAULT;
         return -EFAULT;
     }
+
+    simtemp_update_file_state(file, prev_seq + 1, alert);
 
     return sizeof(sample);
 }
@@ -358,6 +437,7 @@ static struct file_operations simtemp_fops = {
     .open = simtemp_open,
     .release = simtemp_release,
     .read = simtemp_read,
+    .poll = simtemp_poll,
 };
 
 

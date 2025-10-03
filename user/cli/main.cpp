@@ -147,15 +147,7 @@ private:
     int fd_; ///< File descriptor for /dev/simtemp
     std::string devpath_;
 public:
-    /**
-     * @brief Construct a SimTempDevice object.
-     * @param[in] dev Device path (default: /dev/simtemp)
-     */
     SimTempDevice(const std::string& dev = "/dev/simtemp") : fd_(-1), devpath_(dev) {}
-
-    /**
-     * @brief Destructor. Closes device if open.
-     */
     ~SimTempDevice() { if (fd_ >= 0) close(fd_); }
     
     /**
@@ -322,6 +314,7 @@ int run_test_mode() {
     /* 3. Wait for up to 2 periods for alert */
     for (int period_count = 0; period_count < 2; ++period_count) {
         if (dev.read_sample(sample, period + 100)) {
+            std::cout << format_sample(sample) << std::endl; // Print formatted sample
             if (sample.flags & THRESHOLD_CROSSED) {
                 got_alert = true;
                 break;
