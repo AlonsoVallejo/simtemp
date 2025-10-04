@@ -15,6 +15,16 @@
 #define NEW_SAMPLE 0x1
 #define THRESHOLD_CROSSED 0x2
 
+#define SIMTEMP_SAMPLING_MS_MIN      1
+#define SIMTEMP_SAMPLING_MS_MAX      10000    /* 10 seconds */
+
+#define SIMTEMP_THRESHOLD_MC_MIN     -20000   /* -20C */
+#define SIMTEMP_THRESHOLD_MC_MAX     60000    /* 60C */
+
+#define SIMTEMP_MODE_NORMAL          "normal"
+#define SIMTEMP_MODE_NOISY           "noisy"
+#define SIMTEMP_MODE_RAMP            "ramp"
+
 /** 
  * @brief Per-file state for poll/read threshold event tracking.
  */
@@ -162,14 +172,12 @@ static ssize_t sampling_ms_show(struct device *dev, struct device_attribute *att
 static ssize_t sampling_ms_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
     unsigned int val;
-    /* check for valid input values */
-    if ( ( kstrtouint(buf, 10, &val) < 0 ) || (val == 0) ) {
+    if (kstrtouint(buf, 10, &val) < 0 ||
+        val < SIMTEMP_SAMPLING_MS_MIN || val > SIMTEMP_SAMPLING_MS_MAX) {
         stats_last_error = -EINVAL;
         return -EINVAL;
     }
-
     sampling_ms = val;
-    
     return count;
 }
 static DEVICE_ATTR_RW(sampling_ms); /* Read/Write attribute */
@@ -197,14 +205,12 @@ static ssize_t threshold_mC_show(struct device *dev, struct device_attribute *at
 static ssize_t threshold_mC_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
     int val;
-    if (kstrtoint(buf, 10, &val) < 0) {
-        /* Invalid input */
+    if (kstrtoint(buf, 10, &val) < 0 ||
+        val < SIMTEMP_THRESHOLD_MC_MIN || val > SIMTEMP_THRESHOLD_MC_MAX) {
         stats_last_error = -EINVAL;
         return -EINVAL;
     }
-
     threshold_mC = val;
-    
     return count;
 }
 static DEVICE_ATTR_RW(threshold_mC); /* Read/Write attribute */
@@ -231,25 +237,23 @@ static ssize_t mode_show(struct device *dev, struct device_attribute *attr, char
  */
 static ssize_t mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
-    size_t len = min(count, sizeof(mode)-1);
-    char tmp[16];
+    char mode_buf[16];
+    size_t len = min(count, sizeof(mode_buf) - 1);
 
-    memcpy(tmp, buf, len);
-    tmp[len] = '\0';
+    strncpy(mode_buf, buf, len);
+    mode_buf[len] = '\0';
+    // Remove trailing newline if present
+    char *newline = strchr(mode_buf, '\n');
+    if (newline) *newline = '\0';
 
-    /* Remove trailing newline if present */
-    if (len > 0 && tmp[len-1] == '\n')
-        tmp[len-1] = '\0';
-
-    /* Validate mode */
-    if (strcmp(tmp, "normal") != 0 &&
-        strcmp(tmp, "noisy") != 0 &&
-        strcmp(tmp, "ramp") != 0) {
+    if (strcmp(mode_buf, SIMTEMP_MODE_NORMAL) != 0 &&
+        strcmp(mode_buf, SIMTEMP_MODE_NOISY) != 0 &&
+        strcmp(mode_buf, SIMTEMP_MODE_RAMP) != 0) {
         stats_last_error = -EINVAL;
         return -EINVAL;
     }
-
-    strcpy(mode, tmp);
+    strncpy(mode, mode_buf, sizeof(mode) - 1);
+    mode[sizeof(mode) - 1] = '\0';
     return count;
 }
 static DEVICE_ATTR_RW(mode); /* Read/Write attribute */

@@ -16,6 +16,14 @@
 #define NEW_SAMPLE 0x1
 #define THRESHOLD_CROSSED 0x2
 
+#define SIMTEMP_SAMPLING_MS_MIN      1
+#define SIMTEMP_SAMPLING_MS_MAX      10000
+#define SIMTEMP_THRESHOLD_MC_MIN     -20000
+#define SIMTEMP_THRESHOLD_MC_MAX     60000
+#define SIMTEMP_MODE_NORMAL          "normal"
+#define SIMTEMP_MODE_NOISY           "noisy"
+#define SIMTEMP_MODE_RAMP            "ramp"
+
 /**
  * @brief Temperature sample structure matching kernel layout.
  */
@@ -232,41 +240,79 @@ void prompt_and_set_config() {
     int threshold_val = 0;
     std::string input;
 
-    std::cout << "Enter sampling period in ms [" << curr_sampling << "]: ";
-    std::getline(std::cin, input);
+    // Sampling period prompt with re-entry on invalid input
+    while (true) {
+        std::cout << "Enter sampling period in ms [" << curr_sampling << "]: ";
+        std::getline(std::cin, input);
 
-    if (!input.empty()) {
+        if (input.empty()) break;
         try {
             sampling_val = std::stoul(input);
-            if (sampling_val > 0) {
-                if (sysfs::set_sampling_period_ms(sampling_val)) {
-                    curr_sampling = sampling_val;
-                } else {
-                    std::cerr << "Failed to set sampling_ms, using previous value.\n";
-                }
+            if (sampling_val < SIMTEMP_SAMPLING_MS_MIN || sampling_val > SIMTEMP_SAMPLING_MS_MAX) {
+                std::cerr << "Sampling period must be between " << SIMTEMP_SAMPLING_MS_MIN
+                          << " and " << SIMTEMP_SAMPLING_MS_MAX << " ms.\n";
+                continue;
             }
+            if (!sysfs::set_sampling_period_ms(sampling_val)) {
+                std::cerr << "Failed to set sampling_ms, using previous value.\n";
+            } else {
+                curr_sampling = sampling_val;
+            }
+            break;
         } catch (...) {
-            std::cerr << "Invalid input, using previous value.\n";
+            std::cerr << "Invalid input, please enter a number.\n";
         }
     }
 
-    std::cout << "Enter threshold in milli-Celsius [" << curr_threshold << "]: ";
-    std::getline(std::cin, input);
+    // Threshold prompt with re-entry on invalid input
+    while (true) {
+        std::cout << "Enter threshold in milli-Celsius [" << curr_threshold << "]: ";
+        std::getline(std::cin, input);
 
-    if (!input.empty()) {
+        if (input.empty()) { 
+            break;
+        }
         try {
             threshold_val = std::stoi(input);
-            if (sysfs::set_threshold_mC(threshold_val)) {
-                curr_threshold = threshold_val;
-            } else {
-                std::cerr << "Failed to set threshold_mC, using previous value.\n";
+            if (threshold_val < SIMTEMP_THRESHOLD_MC_MIN || threshold_val > SIMTEMP_THRESHOLD_MC_MAX) {
+                std::cerr << "Threshold must be between " << SIMTEMP_THRESHOLD_MC_MIN
+                          << " and " << SIMTEMP_THRESHOLD_MC_MAX << " mC (-20C to 60C).\n";
+                continue;
             }
+            if (!sysfs::set_threshold_mC(threshold_val)) {
+                std::cerr << "Failed to set threshold_mC, using previous value.\n";
+            } else {
+                curr_threshold = threshold_val;
+            }
+            break;
         } catch (...) {
-            std::cerr << "Invalid input, using previous value.\n";
+            std::cerr << "Invalid input, please enter a number.\n";
         }
     }
 
-    std::cout << "Using sampling_ms=" << curr_sampling << ", threshold_mC=" << curr_threshold << std::endl;
+    /* Mode prompt with re-entry on invalid input */
+    while (true) {
+        std::cout << "Enter mode [normal|noisy|ramp] [" << sysfs::get_mode() << "]: ";
+        std::getline(std::cin, input);
+        if (input.empty()) { 
+            break;
+        }
+        if (input != SIMTEMP_MODE_NORMAL && input != SIMTEMP_MODE_NOISY && input != SIMTEMP_MODE_RAMP) {
+            std::cerr << "Mode must be one of: " << SIMTEMP_MODE_NORMAL << ", "
+                      << SIMTEMP_MODE_NOISY << ", " << SIMTEMP_MODE_RAMP << ".\n";
+            continue;
+        }
+        std::ofstream f(sysfs::base + "mode");
+        if (!f.is_open()) {
+            std::cerr << "Failed to set mode, using previous value.\n";
+        } else {
+            f << input << std::endl;
+        }
+        break;
+    }
+
+    std::cout << "Using sampling_ms=" << curr_sampling << ", threshold_mC=" << curr_threshold
+              << ", mode=" << sysfs::get_mode() << std::endl;
 }
 
 /**
@@ -314,7 +360,7 @@ int run_test_mode() {
     /* 3. Wait for up to 2 periods for alert */
     for (int period_count = 0; period_count < 2; ++period_count) {
         if (dev.read_sample(sample, period + 100)) {
-            std::cout << format_sample(sample) << std::endl; // Print formatted sample
+            std::cout << format_sample(sample) << std::endl;
             if (sample.flags & THRESHOLD_CROSSED) {
                 got_alert = true;
                 break;
